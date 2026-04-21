@@ -521,6 +521,11 @@ impl Default for GravityModelSource {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ZonalTerms {
+    
+}
+
 /// Gravity model configuration
 ///
 /// Specifies the gravity model to use for computing gravitational acceleration.
@@ -545,6 +550,13 @@ pub enum GravityConfiguration {
         /// Maximum order (m) of expansion
         order: usize,
     },
+    
+    /// Uses zonal terms (J_2..J_n) only. 
+    /// Has the same effect as setting m = 0 in SphericalHarmonic, but by making it an explicit invariant, we can write code that the compiler can optimize better
+    Zonal {
+        terms: ZonalTerms,
+        n: usize
+    }
 }
 
 // =============================================================================

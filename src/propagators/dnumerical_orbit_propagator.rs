@@ -1109,6 +1109,9 @@ impl DNumericalOrbitPropagator {
             GravityConfiguration::PointMass => {
                 a_total += accel_point_mass_gravity(r, Vector3::zeros(), GM_EARTH);
             }
+            GravityConfiguration::Zonal {terms, n} => {
+                a_total += accel_point_mass_gravity(r, Vector3::zeros(), GM_EARTH);
+            }
             GravityConfiguration::SphericalHarmonic {
                 source,
                 degree,

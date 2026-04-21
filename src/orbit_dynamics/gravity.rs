@@ -2,6 +2,7 @@
 Implement central-body gravity force models.
  */
 
+use std::any::Any;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -11,6 +12,7 @@ use nalgebra::{DMatrix, Vector3};
 use crate::math::{SMatrix3, traits::IntoPosition};
 use once_cell::sync::Lazy;
 
+use crate::constants::R_EARTH;
 use crate::math::kronecker_delta;
 use crate::utils::BraheError;
 
@@ -24,6 +26,15 @@ static PACKAGED_GGM05S: &[u8] = include_bytes!("../../data/gravity_models/GGM05S
 static PACKAGED_JGM3: &[u8] = include_bytes!("../../data/gravity_models/JGM3.gfc");
 static GLOBAL_GRAVITY_MODEL: Lazy<Arc<RwLock<Box<GravityModel>>>> =
     Lazy::new(|| Arc::new(RwLock::new(Box::new(GravityModel::new()))));
+
+/// Earth zonal harmonics,
+/// J values taken from [Wakker, FUNDAMENTALS OF ASTRODYNAMICS, p. 529]
+/// Formulas taken from [Vallado, Fundamentals of Astrophysics and Applications, p. 595]
+pub const J2: f64 = 1.0826269e-3;
+pub const J3: f64 = -2.5325e-6;
+pub const J4: f64 = -1.612e-6;
+pub const J5: f64 = -2.2730e-7;
+pub const J6: f64 = 5.4062e-7;
 
 /// Set the global gravity model to a new gravity model. A global gravity model is useful as it
 /// allows for a single gravity model to be used throughout a program. This is useful when multiple
@@ -149,6 +160,74 @@ pub fn accel_point_mass_gravity<P: IntoPosition>(
     } else {
         -gm * d / d_norm.powi(3)
     }
+}
+
+/// CPU optimized way to calculate
+pub fn fast_spherical_zonal_harmonics_accel<P: IntoPosition>(
+    r_object: P,
+    r_central_body: Vector3<f64>,
+    gm: f64,
+    n: usize,
+) -> Vector3<f64> {
+    let pos = r_object.position();
+
+    let i = pos[0];
+    let j = pos[1];
+    let k = pos[2];
+
+    let r = r_object.position().norm();
+
+    let k_r = k / r;
+    let k_r2 = k_r * k_r;
+    let k_r3 = k_r2 * k_r;
+    let k_r4 = k_r2 * k_r2;
+    let k_r5 = k_r4 * k_r;
+    let k_r6 = k_r3 * k_r3;
+
+    // Two-body acceleration
+    let mut accel = accel_point_mass_gravity(r_object, r_central_body, gm);
+
+    if n < 2 {
+        return accel;
+    }
+
+    // Explicit math based on [Vallado, p.593ff], leave optimization to compiler
+    if n == 2 {
+        // Shared term for J2: (-3 * J2 * GM *  (R_e / r)^2 ) / 2
+        let j2_coeff = (-3. * J2 * gm * R_EARTH.powi(2)) / (2. * r.powi(5));
+
+        let j2_xy_factor = 1.0 - (5.0 * k_r2 / r.powi(2));
+        let j2_z_factor = 3.0 - (5.0 * k_r2 / r.powi(2));
+
+        accel.x += j2_coeff * j2_xy_factor * i;
+        accel.y += j2_coeff * j2_xy_factor * j;
+        accel.z += j2_coeff * j2_z_factor * k;
+    }
+
+    if n == 3 {
+        let j3_coeff = (-5. * J3 * gm * R_EARTH.powi(3)) / (2. * r.powi(7));
+
+        let j3_xy_factor = 3. * k - (7. * k.powi(3) / r.powi(2));
+        let j3_z_factor = 3. * k.powi(2) - (7. * k.powi(4) / r.powi(2)) - (3. / 5. * r.powi(2));
+
+        accel.x += j3_coeff * j3_xy_factor * i;
+        accel.y += j3_coeff * j3_xy_factor * j;
+        accel.z -= j3_coeff * j3_z_factor;
+    }
+
+    if n == 4 {
+        // TODO: Similar
+    }
+
+    if n == 5 {
+        // TODO: Similar
+    }
+
+    if n == 6 {
+        // TODO: Similar
+    }
+
+    accel
 }
 
 /// Enumeration of the tide system used in a gravity model.
@@ -1037,11 +1116,40 @@ mod tests {
     }
 
     #[test]
+    fn test_fast_spherical_zonal_harmonics_accel() {
+        let earth_center = Vector3::new(0.0, 0.0, 0.0);
+
+        // Equatorial surface position (z=0, so k/r=0)
+        let r_equator = Vector3::new(R_EARTH, 0.0, 0.0);
+        // Polar surface position (z=r, so k/r=1)
+        let r_pole_radius = 6356752.0;
+        let r_polar = Vector3::new(0.0, 0.0, r_pole_radius);
+
+        // J2 should modify the acceleration relative to pure two-body
+        let a_point_mass_equator = accel_point_mass_gravity(r_equator, earth_center, GM_EARTH);
+        let a_j2_equator =
+            fast_spherical_zonal_harmonics_accel(r_equator, earth_center, GM_EARTH, 2);
+
+        // J2 adds to the inward pull
+        assert!(a_j2_equator[0] < a_point_mass_equator[0]);
+
+        let a_point_mass_polar = accel_point_mass_gravity(r_polar, earth_center, GM_EARTH);
+        let a_j2_polar = fast_spherical_zonal_harmonics_accel(r_polar, earth_center, GM_EARTH, 2);
+
+        // J2 adds to the inward pull
+        assert!(a_j2_polar[2] < a_point_mass_polar[2]);
+
+        // (3sin^2ϕ−1) -> Added pull is higher near the poles
+        let pole_pert = a_j2_polar[2].abs() - a_point_mass_polar[2].abs();
+        let equator_pert = a_j2_equator[0].abs() - a_point_mass_equator[0].abs();
+        assert!(pole_pert > equator_pert);
+    }
+
+    #[test]
     fn test_gravity_model_compute_spherical_harmonics() {
         setup_global_test_eop();
 
         let gravity_model = GravityModel::from_model_type(&GravityModelType::EGM2008_360).unwrap();
-
         let r_body = Vector3::new(R_EARTH, 0.0, 0.0);
 
         // Simple test confirming point-mass equivalence
