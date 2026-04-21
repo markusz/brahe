@@ -2,7 +2,6 @@
 Implement central-body gravity force models.
  */
 
-use std::any::Any;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -27,14 +26,20 @@ static PACKAGED_JGM3: &[u8] = include_bytes!("../../data/gravity_models/JGM3.gfc
 static GLOBAL_GRAVITY_MODEL: Lazy<Arc<RwLock<Box<GravityModel>>>> =
     Lazy::new(|| Arc::new(RwLock::new(Box::new(GravityModel::new()))));
 
-/// Earth zonal harmonics,
+/// Earth zonal harmonics
 /// J values taken from [Wakker, FUNDAMENTALS OF ASTRODYNAMICS, p. 529]
 /// Formulas taken from [Vallado, Fundamentals of Astrophysics and Applications, p. 595]
-pub const J2: f64 = 1.0826269e-3;
-pub const J3: f64 = -2.5325e-6;
-pub const J4: f64 = -1.612e-6;
-pub const J5: f64 = -2.2730e-7;
-pub const J6: f64 = 5.4062e-7;
+///
+/// J_2,0
+pub const J2: f64 = 1.0826357e-3;
+/// J_3,0
+pub const J3: f64 = -2.5324737e-6;
+/// J_4,0
+pub const J4: f64 = -1.6199743e-6;
+/// J_5,0
+pub const J5: f64 = -0.2279051e-6;
+/// J_6,0
+pub const J6: f64 = 0.5406168e-6;
 
 /// Set the global gravity model to a new gravity model. A global gravity model is useful as it
 /// allows for a single gravity model to be used throughout a program. This is useful when multiple
@@ -179,10 +184,8 @@ pub fn fast_spherical_zonal_harmonics_accel<P: IntoPosition>(
 
     let k_r = k / r;
     let k_r2 = k_r * k_r;
-    let k_r3 = k_r2 * k_r;
     let k_r4 = k_r2 * k_r2;
-    let k_r5 = k_r4 * k_r;
-    let k_r6 = k_r3 * k_r3;
+    let k_r6 = k_r4 * k_r2;
 
     // Two-body acceleration
     let mut accel = accel_point_mass_gravity(r_object, r_central_body, gm);
@@ -192,39 +195,61 @@ pub fn fast_spherical_zonal_harmonics_accel<P: IntoPosition>(
     }
 
     // Explicit math based on [Vallado, p.593ff], leave optimization to compiler
-    if n == 2 {
+    if n >= 2 {
         // Shared term for J2: (-3 * J2 * GM *  (R_e / r)^2 ) / 2
         let j2_coeff = (-3. * J2 * gm * R_EARTH.powi(2)) / (2. * r.powi(5));
 
-        let j2_xy_factor = 1.0 - (5.0 * k_r2 / r.powi(2));
-        let j2_z_factor = 3.0 - (5.0 * k_r2 / r.powi(2));
+        let j2_xy_factor = 1.0 - 5.0 * k_r2;
+        let j2_z_factor = 3.0 - 5.0 * k_r2;
 
         accel.x += j2_coeff * j2_xy_factor * i;
         accel.y += j2_coeff * j2_xy_factor * j;
         accel.z += j2_coeff * j2_z_factor * k;
     }
 
-    if n == 3 {
+    if n >= 3 {
         let j3_coeff = (-5. * J3 * gm * R_EARTH.powi(3)) / (2. * r.powi(7));
 
-        let j3_xy_factor = 3. * k - (7. * k.powi(3) / r.powi(2));
-        let j3_z_factor = 3. * k.powi(2) - (7. * k.powi(4) / r.powi(2)) - (3. / 5. * r.powi(2));
+        let j3_xy_factor = 3. * k - (7. * k * k_r2);
+        let j3_z_factor = 6. * k.powi(2) - (7. * k.powi(2) * k_r2) - (3. / 5. * r.powi(2));
 
         accel.x += j3_coeff * j3_xy_factor * i;
         accel.y += j3_coeff * j3_xy_factor * j;
-        accel.z -= j3_coeff * j3_z_factor;
+        accel.z += j3_coeff * j3_z_factor;
     }
 
-    if n == 4 {
-        // TODO: Similar
+    if n >= 4 {
+        let j4_coeff = (15. * J4 * gm * R_EARTH.powi(4)) / (8. * r.powi(7));
+
+        let j4_xy_factor = 1. - (14. * k_r2) + (21. * k_r4);
+        let j4_z_factor = 5. - (70. / 3. * k_r2) + (21. * k_r4);
+
+        accel.x += j4_coeff * j4_xy_factor * i;
+        accel.y += j4_coeff * j4_xy_factor * j;
+        accel.z += j4_coeff * j4_z_factor * k;
     }
 
-    if n == 5 {
-        // TODO: Similar
+    if n >= 5 {
+        let re_5 = R_EARTH.powi(5);
+        let j5_coeff = (3. * J5 * gm * re_5) / (8. * r.powi(9));
+
+        let j5_xy_factor = 35. - (210. * k_r2) + (231. * k_r4);
+        let j5_z_factor = 105. - (315. * k_r2) + (231. * k_r4);
+
+        accel.x += j5_coeff * j5_xy_factor * i * k;
+        accel.y += j5_coeff * j5_xy_factor * j * k;
+        accel.z += j5_coeff * j5_z_factor * k.powi(2) - (15. * J5 * gm * re_5 / (8. * r.powi(7)));
     }
 
-    if n == 6 {
-        // TODO: Similar
+    if n >= 6 {
+        let j6_coeff = (-J6 * gm * R_EARTH.powi(6)) / (16. * r.powi(9));
+
+        let j6_xy_factor = 35. - (945. * k_r2) + (3465. * k_r4) - (3003. * k_r6);
+        let j6_z_factor = 245. - (2205. * k_r2) + (4851. * k_r4) - (3003. * k_r6);
+
+        accel.x += j6_coeff * j6_xy_factor * i;
+        accel.y += j6_coeff * j6_xy_factor * j;
+        accel.z += j6_coeff * j6_z_factor * k;
     }
 
     accel
@@ -984,10 +1009,18 @@ pub fn accel_gravity_spherical_harmonics<P: IntoPosition>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use approx::assert_abs_diff_eq;
+    use nalgebra::DVector;
     use rstest::rstest;
 
     use crate::constants::{GM_EARTH, R_EARTH};
+    use crate::traits::DStatePropagator;
     use crate::utils::testing::setup_global_test_eop;
+    use crate::{
+        AngleFormat, DNumericalOrbitPropagator, EOPExtrapolation, Epoch, FileEOPProvider,
+        FileSpaceWeatherProvider, ForceModelConfig, GravityConfiguration, GravityModelSource,
+        NumericalPropagationConfig, SVector6, TimeSystem, ZonalHarmonicsDegrees,
+        set_global_eop_provider, set_global_space_weather_provider, state_koe_to_eci,
+    };
 
     use super::*;
 
@@ -1167,6 +1200,83 @@ mod tests {
         assert_abs_diff_eq!(a_grav[0], -9.81433239, epsilon = 1e-8);
         assert_abs_diff_eq!(a_grav[1], 1.813976e-6, epsilon = 1e-12);
         assert_abs_diff_eq!(a_grav[2], -7.29925652190e-5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_spherical_harmonic_agrees_with_fast_zonal() {
+        let eop = FileEOPProvider::from_default_standard(true, EOPExtrapolation::Hold).unwrap();
+        set_global_eop_provider(eop);
+
+        let sw = FileSpaceWeatherProvider::from_default_file().unwrap();
+        set_global_space_weather_provider(sw);
+
+        let epoch = Epoch::from_datetime(2024, 1, 1, 0, 0, 0.0, 0.0, TimeSystem::UTC);
+        let oe = SVector6::new(R_EARTH + 500e3, 0.01, 97.8, 15.0, 30.0, 45.0);
+        let state = state_koe_to_eci(oe, AngleFormat::Degrees);
+        let dstate = DVector::from_column_slice(state.as_slice());
+        let target = epoch + 86400.0;
+        let degree = ZonalHarmonicsDegrees::J6;
+
+        let mut prop_spherical = DNumericalOrbitPropagator::new(
+            epoch,
+            dstate.clone(),
+            NumericalPropagationConfig::default(),
+            ForceModelConfig {
+                gravity: GravityConfiguration::SphericalHarmonic {
+                    source: GravityModelSource::default(),
+                    degree: (&degree).into(),
+                    order: 0,
+                },
+                drag: None,
+                srp: None,
+                third_body: None,
+                relativity: false,
+                mass: None,
+            },
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut prop_zonal_fast = DNumericalOrbitPropagator::new(
+            epoch,
+            dstate.clone(),
+            NumericalPropagationConfig::default(),
+            ForceModelConfig {
+                gravity: GravityConfiguration::Zonal {
+                    degree: ZonalHarmonicsDegrees::J6,
+                },
+                drag: None,
+                srp: None,
+                third_body: None,
+                relativity: false,
+                mass: None,
+            },
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        prop_spherical.propagate_to(target);
+        prop_zonal_fast.propagate_to(target);
+        let s_state = prop_spherical.current_state();
+        let z_state = prop_zonal_fast.current_state();
+        print!("{} <> {}", s_state, z_state);
+
+        // Allow disagreement for position and velocity after 24h: 3km for pos, 10km/s for vel
+        let eps_pos = 3_000.;
+        let eps_v = 10.;
+
+        assert_abs_diff_eq!(s_state[0], z_state[0], epsilon = eps_pos);
+        assert_abs_diff_eq!(s_state[1], z_state[1], epsilon = eps_pos);
+        assert_abs_diff_eq!(s_state[2], z_state[2], epsilon = eps_pos);
+        assert_abs_diff_eq!(s_state[3], z_state[3], epsilon = eps_v);
+        assert_abs_diff_eq!(s_state[4], z_state[4], epsilon = eps_v);
+        assert_abs_diff_eq!(s_state[5], z_state[5], epsilon = eps_v);
     }
 
     #[rstest]
